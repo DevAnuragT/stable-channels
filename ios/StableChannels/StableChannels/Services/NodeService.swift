@@ -27,6 +27,8 @@ class NodeService {
     // MARK: - Lifecycle
 
     func start(network: Network, esploraURL: String, mnemonic: String) async throws {
+        guard !isRunning else { throw NodeServiceError.alreadyRunning }
+
         let dataDir = Constants.userDataDir.path
 
         // Ensure data directory exists
@@ -88,8 +90,8 @@ class NodeService {
         // Determine which mnemonic to use
         let words: String
         if !mnemonic.isEmpty {
-            // Restore — wipe ALL wallet data so new seed takes effect
-            Self.wipeWalletData()
+            // Explicit restore callers must reset app + LDK state before
+            // starting with a replacement seed. NodeService only starts LDK.
             words = mnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
         } else if let saved = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8),
                   !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -144,7 +146,14 @@ class NodeService {
         eventTask?.cancel()
         eventTask = nil
         try? node?.stop()
+        node = nil
         isRunning = false
+        nodeId = ""
+        channels = []
+    }
+
+    func clearSavedMnemonic() {
+        savedMnemonic = nil
     }
 
     // MARK: - Event Loop
@@ -409,10 +418,12 @@ class NodeService {
 
 enum NodeServiceError: LocalizedError {
     case notRunning
+    case alreadyRunning
 
     var errorDescription: String? {
         switch self {
         case .notRunning: return "Node is not running"
+        case .alreadyRunning: return "Node is already running"
         }
     }
 }
