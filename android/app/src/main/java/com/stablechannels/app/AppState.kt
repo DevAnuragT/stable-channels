@@ -1,7 +1,6 @@
 package com.stablechannels.app
 
 import android.content.Context
-import android.os.PowerManager
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -275,7 +274,7 @@ class AppState(private val context: Context) : ViewModel() {
 
         Log.d("AppState", "Scheduling node stop after 60s grace period")
         backgroundStopJob?.cancel()
-        
+
         // Start Foreground Service to keep CPU and network active
         try {
             LdkBackgroundService.start(context)
@@ -309,12 +308,14 @@ class AppState(private val context: Context) : ViewModel() {
         } catch (e: Exception) {
             Log.e("AppState", "Failed to stop LdkBackgroundService", e)
         }
-        if (!nodeService.isRunning) return
-        Log.d("AppState", "Stopping node for background")
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         stabilityJob?.cancel()
         stabilityJob = null
         pendingDepositJob?.cancel()
         pendingDepositJob = null
+        if (!nodeService.isRunning) return
+        Log.d("AppState", "Stopping node for background")
         nodeService.stop()
     }
 
@@ -329,6 +330,7 @@ class AppState(private val context: Context) : ViewModel() {
             cancelBackgroundStop()
             if (nodeService.isRunning) {
                 Log.d("AppState", "Node still running (grace period), reconnecting")
+                loadChannelFromDB()
                 ensureLSPConnected()
                 refreshBalances()
                 updateStableBalances()
@@ -337,6 +339,7 @@ class AppState(private val context: Context) : ViewModel() {
             Log.d("AppState", "Restarting node from foreground")
             waitForBackgroundService()
             try {
+                loadChannelFromDB()
                 _phase.value = Phase.SYNCING
                 nodeService.start(Network.BITCOIN, chainUrl, null)
                 _phase.value = Phase.WALLET
