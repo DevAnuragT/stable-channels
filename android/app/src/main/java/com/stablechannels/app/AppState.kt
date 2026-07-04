@@ -96,6 +96,7 @@ class AppState(private val context: Context) : ViewModel() {
 
     private val _spendableOnchainSats = MutableStateFlow(0L)
     val spendableOnchainSats: StateFlow<Long> get() = _spendableOnchainSats
+    private var localSpentOnchainSats = 0L
 
     private val _nativeSats: MutableStateFlow<Long>
     val nativeSats: StateFlow<Long> get() = _nativeSats
@@ -1117,6 +1118,8 @@ class AppState(private val context: Context) : ViewModel() {
 
         // Set in-flight state immediately on UI thread to prevent double-click race conditions
         _isSpliceInFlight.value = true
+        localSpentOnchainSats = spendable
+        _spendableOnchainSats.value = 0L
         sweepOnchainStart = spendable
         pendingSplice = PendingSplice("in", sweepAmount)
         _statusMessage.value = "Moving all onchain funds to channel..."
@@ -1137,6 +1140,8 @@ class AppState(private val context: Context) : ViewModel() {
                 ))
             } catch (e: Exception) {
                 _isSpliceInFlight.value = false
+                localSpentOnchainSats = 0L
+                refreshBalances()
                 pendingSplice = null
                 withContext(Dispatchers.Main) {
                     _statusMessage.value = "Sweep failed: ${e.message}"
@@ -1224,11 +1229,16 @@ class AppState(private val context: Context) : ViewModel() {
         val balances = nodeService.balances() ?: return
         val lightning = balances.totalLightningBalanceSats.toLong()
         val onchain = balances.totalOnchainBalanceSats.toLong()
+        Log.i("AppState", "refreshBalances: lightning=$lightning, onchain=$onchain, spendableOnchain=${balances.spendableOnchainBalanceSats}")
         val hasReady = nodeService.channels.any { it.isChannelReady }
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
-        _spendableOnchainSats.value = balances.spendableOnchainBalanceSats.toLong()
+        val rawSpendable = balances.spendableOnchainBalanceSats.toLong()
+        if (rawSpendable == 0L || rawSpendable <= _spendableOnchainSats.value - localSpentOnchainSats) {
+            localSpentOnchainSats = 0L
+        }
+        _spendableOnchainSats.value = maxOf(0L, rawSpendable - localSpentOnchainSats)
 
         // Clear closing flag once lightning balance fully resolves
         // Don't clear pendingClosePaymentId here — let detectOnchainDeposit()
