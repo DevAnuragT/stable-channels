@@ -97,12 +97,15 @@ class AppState(private val context: Context) : ViewModel() {
     private val _spendableOnchainSats = MutableStateFlow(0L)
     val spendableOnchainSats: StateFlow<Long> get() = _spendableOnchainSats
     private var localSpentOnchainSats = 0L
+    private var localSpentTimestamp = 0L
 
     private fun saveLocalSpentOnchainSats(value: Long) {
         localSpentOnchainSats = value
+        localSpentTimestamp = if (value > 0) System.currentTimeMillis() else 0L
         context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
             .edit()
             .putLong("local_spent_onchain_sats", value)
+            .putLong("local_spent_timestamp", localSpentTimestamp)
             .apply()
     }
 
@@ -118,6 +121,7 @@ class AppState(private val context: Context) : ViewModel() {
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
         _nativeSats = MutableStateFlow(prefs.getLong("cached_native_sats", 0L))
         localSpentOnchainSats = prefs.getLong("local_spent_onchain_sats", 0L)
+        localSpentTimestamp = prefs.getLong("local_spent_timestamp", 0L)
 
         // Restore cached channel state so UI shows correct slider position immediately
         val cachedChannelId = prefs.getString("cached_channel_id", null)
@@ -1244,7 +1248,11 @@ class AppState(private val context: Context) : ViewModel() {
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
         val rawSpendable = balances.spendableOnchainBalanceSats.toLong()
-        if (rawSpendable == 0L || rawSpendable <= _spendableOnchainSats.value - localSpentOnchainSats) {
+        val elapsedMinutes = if (localSpentTimestamp > 0L) (System.currentTimeMillis() - localSpentTimestamp) / 1000 / 60 else 0L
+        if (rawSpendable == 0L || 
+            rawSpendable <= _spendableOnchainSats.value - localSpentOnchainSats ||
+            (localSpentTimestamp > 0L && elapsedMinutes >= 5)
+        ) {
             saveLocalSpentOnchainSats(0L)
         }
         _spendableOnchainSats.value = maxOf(0L, rawSpendable - localSpentOnchainSats)
