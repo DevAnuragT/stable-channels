@@ -48,6 +48,22 @@ class AppState(private val context: Context) : ViewModel() {
 
     @Volatile
     var isWaitingForPayment = false
+        set(value) {
+            field = value
+            if (value) {
+                try {
+                    LdkBackgroundService.start(context)
+                } catch (e: Exception) {
+                    Log.e("AppState", "Failed to start LdkBackgroundService", e)
+                }
+            } else {
+                try {
+                    LdkBackgroundService.stop(context)
+                } catch (e: Exception) {
+                    Log.e("AppState", "Failed to stop LdkBackgroundService", e)
+                }
+            }
+        }
 
     private val _errorMessage = MutableStateFlow("")
     val errorMessage: StateFlow<String> = _errorMessage
@@ -128,9 +144,9 @@ class AppState(private val context: Context) : ViewModel() {
 
     var onchainReceiveAddress: String? = null
 
-    private var isSweeping = false
+    private val _isSpliceInFlight = MutableStateFlow(false)
     /** True when any splice (in or out) is in flight — prevents concurrent splices. */
-    val isSpliceInFlight: Boolean get() = isSweeping
+    val isSpliceInFlight: StateFlow<Boolean> = _isSpliceInFlight
     private var sweepOnchainStart: Long = 0
     private var prevOnchainSats: Long = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
         .getLong("cached_onchain_sats", 0L)
@@ -216,7 +232,7 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                     // Restore pending splice state
                     if (databaseService?.hasPendingSplice() == true) {
-                        isSweeping = true
+                        _isSpliceInFlight.value = true
                         spliceTxid = databaseService?.getPendingSpliceTxid() ?: fundingTxid
                     }
                     reregisterPushTokenIfNeeded()
@@ -274,20 +290,13 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun stopNodeForBackground() {
         if (!isWaitingForPayment) {
-            Log.d("AppState", "Stopping node immediately (no active payment request)")
+            Log.i("AppState", "Stopping node immediately (no active payment request)")
             performBackgroundStop()
             return
         }
 
-        Log.d("AppState", "Scheduling node stop after 60s grace period")
+        Log.i("AppState", "Scheduling node stop after 60s grace period")
         backgroundStopJob?.cancel()
-
-        // Start Foreground Service to keep CPU and network active
-        try {
-            LdkBackgroundService.start(context)
-        } catch (e: Exception) {
-            Log.e("AppState", "Failed to start LdkBackgroundService", e)
-        }
 
         backgroundStopJob = viewModelScope.launch(Dispatchers.IO) {
             delay(60000L) // 60 seconds delay
@@ -299,22 +308,13 @@ class AppState(private val context: Context) : ViewModel() {
         if (backgroundStopJob != null) {
             backgroundStopJob?.cancel()
             backgroundStopJob = null
-            Log.d("AppState", "Cancelled pending background stop")
-        }
-        try {
-            LdkBackgroundService.stop(context)
-        } catch (e: Exception) {
-            Log.e("AppState", "Failed to stop LdkBackgroundService", e)
+            Log.i("AppState", "Cancelled pending background stop")
         }
     }
 
     private fun performBackgroundStop() {
         backgroundStopJob = null
-        try {
-            LdkBackgroundService.stop(context)
-        } catch (e: Exception) {
-            Log.e("AppState", "Failed to stop LdkBackgroundService", e)
-        }
+        isWaitingForPayment = false
         heartbeatJob?.cancel()
         heartbeatJob = null
         stabilityJob?.cancel()
@@ -322,12 +322,11 @@ class AppState(private val context: Context) : ViewModel() {
         pendingDepositJob?.cancel()
         pendingDepositJob = null
         if (!nodeService.isRunning) return
-        Log.d("AppState", "Stopping node for background")
+        Log.i("AppState", "Stopping node for background")
         nodeService.stop()
     }
 
     fun restartNodeFromForeground() {
-        isWaitingForPayment = false
         viewModelScope.launch(Dispatchers.IO) {
             if (!isInitialized) {
                 isInitialized = true
@@ -336,7 +335,7 @@ class AppState(private val context: Context) : ViewModel() {
             }
             cancelBackgroundStop()
             if (nodeService.isRunning) {
-                Log.d("AppState", "Node still running (grace period), reconnecting")
+                Log.i("AppState", "Node still running (grace period), reconnecting")
                 loadChannelFromDB()
                 ensureLSPConnected()
                 refreshBalances()
@@ -402,7 +401,7 @@ class AppState(private val context: Context) : ViewModel() {
                 }
                 val isSplice = completedSplice || channelIdChanged
                 if (isSplice) {
-                    isSweeping = false
+                    _isSpliceInFlight.value = false
                     spliceTxid = null
                     if (!completedSplice) databaseService?.completeLatestSplice(fundingTxid)
                     val price = priceService.currentPrice.value
@@ -471,7 +470,7 @@ class AppState(private val context: Context) : ViewModel() {
                 handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
             }
             is Event.SpliceNegotiationFailed -> {
-                isSweeping = false
+                _isSpliceInFlight.value = false
                 spliceTxid = null
                 pendingSplice = null
                 databaseService?.failLatestPendingSplice()
@@ -1055,7 +1054,7 @@ class AppState(private val context: Context) : ViewModel() {
     internal fun detectOnchainDeposit() {
         // Use already-updated value — refreshBalances() was just called before this
         val currentSats = _onchainBalanceSats.value
-        if (currentSats > prevOnchainSats && !isSweeping && pendingSplice == null) {
+        if (currentSats > prevOnchainSats && !_isSpliceInFlight.value && pendingSplice == null) {
             val depositSats = currentSats - prevOnchainSats
             if (depositSats < 1000) {
                 prevOnchainSats = currentSats
@@ -1099,7 +1098,7 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun sweepToChannel() {
-        if (isSweeping) {
+        if (_isSpliceInFlight.value) {
             _statusMessage.value = "Sweep already in progress"
             return
         }
@@ -1116,28 +1115,53 @@ class AppState(private val context: Context) : ViewModel() {
         }
         val sweepAmount = spendable
 
+        // Set in-flight state immediately on UI thread to prevent double-click race conditions
+        _isSpliceInFlight.value = true
+        sweepOnchainStart = spendable
+        pendingSplice = PendingSplice("in", sweepAmount)
+        _statusMessage.value = "Moving all onchain funds to channel..."
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                nodeService.spliceInWithAll(channel.userChannelId, channel.counterpartyNodeId)
+                val price = priceService.currentPrice.value
+                val amountUSD = if (price > 0) (sweepAmount.toDouble() / Constants.SATS_IN_BTC) * price else null
+                databaseService?.recordPayment(
+                    paymentId = null, paymentType = "splice_in", direction = "received",
+                    amountMsat = sweepAmount * 1000,
+                    amountUSD = amountUSD, btcPrice = price.takeIf { it > 0 }, status = "pending"
+                )
+                AuditService.log("SWEEP_TO_CHANNEL", mapOf(
+                    "amount_sats" to sweepAmount,
+                    "mode" to "splice_in_with_all"
+                ))
+            } catch (e: Exception) {
+                _isSpliceInFlight.value = false
+                pendingSplice = null
+                withContext(Dispatchers.Main) {
+                    _statusMessage.value = "Sweep failed: ${e.message}"
+                }
+                AuditService.log("SWEEP_FAILED", mapOf("error" to (e.message ?: "")))
+            }
+        }
+    }
+
+    fun spliceOut(address: String, amountSats: Long) {
+        if (_isSpliceInFlight.value) {
+            throw Exception("A splice is already in progress — try again shortly")
+        }
+        val sc = stableChannel.value
+        if (sc.userChannelId.isEmpty()) {
+            throw Exception("No active channel found")
+        }
+        _isSpliceInFlight.value = true
         try {
-            nodeService.spliceInWithAll(channel.userChannelId, channel.counterpartyNodeId)
-            isSweeping = true
-            sweepOnchainStart = spendable
-            pendingSplice = PendingSplice("in", sweepAmount)
-            _statusMessage.value = "Moving all onchain funds to channel..."
-            val price = priceService.currentPrice.value
-            val amountUSD = if (price > 0) (sweepAmount.toDouble() / Constants.SATS_IN_BTC) * price else null
-            databaseService?.recordPayment(
-                paymentId = null, paymentType = "splice_in", direction = "received",
-                amountMsat = sweepAmount * 1000,
-                amountUSD = amountUSD, btcPrice = price.takeIf { it > 0 }, status = "pending"
-            )
-            AuditService.log("SWEEP_TO_CHANNEL", mapOf(
-                "amount_sats" to sweepAmount,
-                "mode" to "splice_in_with_all"
-            ))
+            pendingSplice = PendingSplice("out", amountSats, address)
+            nodeService.spliceOut(sc.userChannelId, sc.counterparty, address, amountSats)
         } catch (e: Exception) {
-            isSweeping = false
-            _statusMessage.value = "Sweep failed: ${e.message}"
-            AuditService.log("SWEEP_FAILED", mapOf("error" to (e.message ?: "")))
-            return
+            _isSpliceInFlight.value = false
+            pendingSplice = null
+            throw e
         }
     }
 
@@ -1215,7 +1239,7 @@ class AppState(private val context: Context) : ViewModel() {
 
         _totalBalanceSats.value = when {
             isChannelClosing -> onchain
-            isSweeping -> lightning
+            _isSpliceInFlight.value -> lightning
             // No open channel but both balances present: lightning is pending-close claimable
             // that overlaps with on-chain — avoid double-count
             !hasReady && lightning > 0 && onchain > 0 -> onchain

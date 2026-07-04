@@ -20,7 +20,7 @@ class LdkBackgroundService : Service() {
         private const val CHANNEL_ID = "ldk_background_channel"
 
         fun start(context: Context) {
-            Log.d(TAG, "Starting LdkBackgroundService")
+            Log.i(TAG, "Starting LdkBackgroundService")
             val intent = Intent(context, LdkBackgroundService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -30,7 +30,7 @@ class LdkBackgroundService : Service() {
         }
 
         fun stop(context: Context) {
-            Log.d(TAG, "Stopping LdkBackgroundService")
+            Log.i(TAG, "Stopping LdkBackgroundService")
             val intent = Intent(context, LdkBackgroundService::class.java)
             context.stopService(intent)
         }
