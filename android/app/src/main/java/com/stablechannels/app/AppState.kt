@@ -98,6 +98,14 @@ class AppState(private val context: Context) : ViewModel() {
     val spendableOnchainSats: StateFlow<Long> get() = _spendableOnchainSats
     private var localSpentOnchainSats = 0L
 
+    private fun saveLocalSpentOnchainSats(value: Long) {
+        localSpentOnchainSats = value
+        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+            .edit()
+            .putLong("local_spent_onchain_sats", value)
+            .apply()
+    }
+
     private val _nativeSats: MutableStateFlow<Long>
     val nativeSats: StateFlow<Long> get() = _nativeSats
 
@@ -109,6 +117,7 @@ class AppState(private val context: Context) : ViewModel() {
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
         _nativeSats = MutableStateFlow(prefs.getLong("cached_native_sats", 0L))
+        localSpentOnchainSats = prefs.getLong("local_spent_onchain_sats", 0L)
 
         // Restore cached channel state so UI shows correct slider position immediately
         val cachedChannelId = prefs.getString("cached_channel_id", null)
@@ -1118,7 +1127,7 @@ class AppState(private val context: Context) : ViewModel() {
 
         // Set in-flight state immediately on UI thread to prevent double-click race conditions
         _isSpliceInFlight.value = true
-        localSpentOnchainSats = spendable
+        saveLocalSpentOnchainSats(spendable)
         _spendableOnchainSats.value = 0L
         sweepOnchainStart = spendable
         pendingSplice = PendingSplice("in", sweepAmount)
@@ -1140,7 +1149,7 @@ class AppState(private val context: Context) : ViewModel() {
                 ))
             } catch (e: Exception) {
                 _isSpliceInFlight.value = false
-                localSpentOnchainSats = 0L
+                saveLocalSpentOnchainSats(0L)
                 refreshBalances()
                 pendingSplice = null
                 withContext(Dispatchers.Main) {
@@ -1236,7 +1245,7 @@ class AppState(private val context: Context) : ViewModel() {
         _hasReadyChannel.value = hasReady
         val rawSpendable = balances.spendableOnchainBalanceSats.toLong()
         if (rawSpendable == 0L || rawSpendable <= _spendableOnchainSats.value - localSpentOnchainSats) {
-            localSpentOnchainSats = 0L
+            saveLocalSpentOnchainSats(0L)
         }
         _spendableOnchainSats.value = maxOf(0L, rawSpendable - localSpentOnchainSats)
 
