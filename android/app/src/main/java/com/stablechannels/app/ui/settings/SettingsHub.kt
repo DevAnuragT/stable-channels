@@ -16,9 +16,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.stablechannels.app.AppState
+import com.stablechannels.app.util.Constants
 
 @Composable
 fun SettingsHub(appState: AppState, navController: NavController) {
@@ -106,6 +108,13 @@ fun SettingsHub(appState: AppState, navController: NavController) {
                 iconBackground = Color(0xFF6366F1),
                 label = "App Access",
                 onClick = { navController.navigate(SettingsRoute.AppAccess.route) }
+            )
+            val uriHandler = LocalUriHandler.current
+            SettingsNavLink(
+                icon = Icons.Default.PrivacyTip,
+                iconBackground = Color(0xFF6366F1),
+                label = "Privacy Policy",
+                onClick = { uriHandler.openUri(Constants.PRIVACY_POLICY_URL) }
             )
 
             // About section
