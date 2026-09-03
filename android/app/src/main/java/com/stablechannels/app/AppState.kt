@@ -262,6 +262,9 @@ class AppState(private val context: Context) : ViewModel() {
         paymentIds.forEach { refreshTradeOutcome(it) }
     }
     var pendingSplice: PendingSplice? = null
+    // Caps retries so an uncommittable sync message can't wedge the event pipeline forever.
+    private val syncRetryCounts = mutableMapOf<String, Int>()
+    private val MAX_SYNC_RETRIES = 20
     private val _isChannelClosing = MutableStateFlow(false)
     val isChannelClosingFlow: StateFlow<Boolean> = _isChannelClosing
     var isChannelClosing: Boolean
@@ -1109,7 +1112,14 @@ class AppState(private val context: Context) : ViewModel() {
         when (result.status) {
             TradeControlApplyStatus.RETRY -> {
                 try { db.markTradeResponseNotCommittable(message) } catch (_: Exception) {}
-                AuditService.log("TRADE_RESULT_DEFERRED", mapOf("payment_hash" to paymentHash))
+                val attempts = (syncRetryCounts[paymentHash] ?: 0) + 1
+                syncRetryCounts[paymentHash] = attempts
+                if (attempts > MAX_SYNC_RETRIES) {
+                    syncRetryCounts.remove(paymentHash)
+                    AuditService.log("TRADE_RESULT_GAVE_UP", mapOf("payment_hash" to paymentHash, "attempts" to attempts))
+                    return true
+                }
+                AuditService.log("TRADE_RESULT_DEFERRED", mapOf("payment_hash" to paymentHash, "attempt" to attempts))
                 throw RetryableSyncException("Signed trade result could not be committed")
             }
             TradeControlApplyStatus.INVALID -> {
